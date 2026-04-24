@@ -113,7 +113,7 @@ You should see your workflow running.
 For each repo on GitHub:
 
 1. Settings → Branches → Add branch protection rule
-2. Branch name pattern: `main`
+2. Branch name pattern: `master`
 3. Enable:
    - Require a pull request before merging
    - Require status checks to pass before merging

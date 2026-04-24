@@ -302,10 +302,9 @@ GitHub Actions (automated)
      ├── Build artifacts
      │
      ├── [on PR] → Run checks, block merge if failing
-     ├── [on merge to main] → Deploy to staging
-     └── [on release tag] → Deploy to production
+     └── [on push to master] → Deploy to production
            │
-           ├── SSH to VPS
+           ├── SSH to server
            ├── Pull latest code
            ├── Install dependencies
            ├── Build (tsc)
@@ -318,23 +317,16 @@ GitHub Actions (automated)
 
 ## 5. CI/CD Architecture Plan
 
-### Philosophy: Per-Service Pipelines + Shared Reusable Workflows
+### Philosophy: Per-Service Pipelines (Self-Contained)
 
 You said it best: teams that start with a "universal pipeline" regret it later.
-So here's the architecture:
+Each repo gets its own standalone `ci-cd.yml` — no shared reusable workflows
+needed at this scale. Keeps each pipeline independent and easy to customize:
 
 ```
-.github/
-├── workflows/
-│   ├── mirror-frontend.yml      # Mirror React app pipeline
-│   ├── mirror-server.yml        # mirror-server pipeline
-│   ├── dina-server.yml          # dina-server pipeline
-│   └── reusable/
-│       ├── node-setup.yml       # Shared: Node.js + npm ci + cache
-│       ├── typescript-check.yml # Shared: tsc --noEmit
-│       ├── security-audit.yml   # Shared: npm audit + dependency check
-│       ├── ssh-deploy.yml       # Shared: SSH + deploy + PM2 reload
-│       └── health-check.yml     # Shared: Post-deploy verification
+mirror-server/.github/workflows/ci-cd.yml    ← Backend API pipeline
+dina-server/.github/workflows/ci-cd.yml      ← AI/LLM server pipeline
+Mirror/.github/workflows/ci-cd.yml           ← React frontend pipeline (at repo root)
 ```
 
 ### IDE Recommendation: VS Code
@@ -356,76 +348,76 @@ So here's the architecture:
 ### Pipeline Design: Mirror Frontend
 
 ```yaml
-# Trigger: Push to main, PRs
-# Steps:
+# Trigger: Push to master/develop, PRs to master/develop
+# Quality Gates (run in client/ working directory):
 1. Checkout code
-2. Setup Node.js 20 LTS + npm cache
+2. Setup Node.js 22 + npm cache
 3. npm ci (clean install)
 4. ESLint (lint check)
 5. TypeScript type-check (tsc -b --noEmit)
-6. Vite build (produces dist/)
-7. [Future] Run tests (Vitest)
-8. [On main] Deploy:
-   a. SCP dist/ to VPS:/var/www/html/Mirror/
-   b. Verify .htaccess is in place
-   c. Smoke test (curl the URL)
+6. Vite production build (produces dist/)
+7. Verify build output (index.html + .htaccess)
+8. Bundle size analysis (warn >5MB, alert >10MB)
+9. Security audit (npm audit)
+10. Upload dist/ as artifact (master only)
+# Deploy (master push or manual trigger):
+   a. Download build artifact
+   b. SSH + backup existing dist/
+   c. SCP dist/ to server at SERVER_DIST_PATH
+   d. Smoke test (curl /Mirror/ → 200)
+   e. Auto rollback from backup on failure
+   f. Git tag + GitHub Release
 ```
 
 ### Pipeline Design: mirror-server
 
 ```yaml
-# Trigger: Push to main, PRs
-# Steps:
+# Trigger: Push to master/develop, PRs to master/develop
+# Quality Gates:
 1. Checkout code
-2. Setup Node.js 20 LTS + npm cache
+2. Setup Node.js 22 + npm cache
 3. npm ci
 4. TypeScript strict type-check (tsc --noEmit)
-5. npm audit (security)
-6. Build (tsc → dist/)
-7. [Future] Run tests
-8. [On main] Deploy:
-   a. SSH to VPS
-   b. cd /var/www/mirror-server
-   c. git pull origin main
+5. Build production artifacts (tsc → dist/)
+6. Security audit (npm audit)
+7. Secret scanning (grep for hardcoded credentials)
+8. Verify build artifacts (dist/index.js)
+# Deploy (master push or manual trigger):
+   a. SSH to server as mirror_app
+   b. Snapshot current commit for rollback
+   c. git fetch origin master && git reset --hard origin/master
    d. npm ci --production
    e. npm run build
-   f. pm2 reload ecosystem.config.js
-   g. Health check (curl /mirror/api/health)
-   h. If health check fails → pm2 reload previous version
+   f. sudo pm2 reload ecosystem.config.js
+   g. Health check (/mirror/api/health → 200, 6 retries)
+   h. Auto rollback to snapshot commit on failure
+   i. Git tag + GitHub Release
 ```
 
 ### Pipeline Design: dina-server
 
 ```yaml
-# Trigger: Push to main, PRs  
-# Steps:
+# Trigger: Push to master/develop, PRs to master/develop
+# Quality Gates:
 1. Checkout code
-2. Setup Node.js 20 LTS + npm cache
+2. Setup Node.js 22 + npm cache
 3. npm ci
 4. TypeScript strict type-check (tsc --noEmit)
-5. npm audit (security)
-6. Build (tsc → dist/)
-7. [Future] Run tests (Jest)
-8. [On main] Deploy:
-   a. SSH to VPS
-   b. cd /var/www/dina-server
-   c. git pull origin main
+5. Build production artifacts (tsc → dist/)
+6. Security audit (npm audit)
+7. Secret scanning (grep for hardcoded credentials)
+8. Verify build artifacts (dist/index.js + dist/modules/mirror/index.js)
+# Deploy (master push or manual trigger):
+   a. SSH to server as dina
+   b. Snapshot current commit for rollback
+   c. git fetch origin master && git reset --hard origin/master
    d. npm ci --production
-   e. npm run build
+   e. npm run build (verify mirror module builds)
    f. sudo pm2 reload ecosystem.config.js
-   g. Health check (verify DINA responds on port 8445)
-   h. If health check fails → rollback
+   g. Health check (/dina/api/v1/health → 200, 6 retries)
+   h. Auto rollback to snapshot commit on failure
+   i. Git tag + GitHub Release
 ```
-
-### Shared Reusable Workflows (DRY principle)
-
-Instead of duplicating steps, we extract common patterns:
-
-1. **node-setup** — Install Node.js, restore npm cache, run `npm ci`
-2. **typescript-check** — Run `tsc --noEmit` for type safety
-3. **security-audit** — `npm audit --audit-level=high`
-4. **ssh-deploy** — Connect via SSH, pull, build, restart PM2
-5. **health-check** — Post-deploy verification with automatic rollback
 
 ### Versioning Strategy
 
@@ -443,7 +435,7 @@ Git Tags → GitHub Releases → Automatic deployment
 ### Branching Strategy (Git Flow Simplified)
 
 ```
-main (production)
+master (production)
   │
   ├── develop (staging/integration)
   │     │
@@ -451,28 +443,31 @@ main (production)
   │     ├── feature/new-visualization
   │     └── fix/websocket-reconnect
   │
-  └── hotfix/critical-security-patch (→ direct to main)
+  └── hotfix/critical-security-patch (→ direct to master)
 ```
 
 ### Secrets Management
 
 GitHub Secrets needed (repository-level):
 ```
-VPS_HOST          — Production server IP/hostname
-VPS_USER          — SSH user (mirror_app or dina)
-VPS_SSH_KEY       — Private SSH key for deployment
-VPS_DEPLOY_PATH   — /var/www/mirror-server or /var/www/dina-server
+SERVER_HOST         — Production server IP/hostname
+SERVER_USER         — SSH user (mirror_app or dina)
+SERVER_SSH_KEY      — Private ed25519 SSH key for deployment
+SERVER_DEPLOY_PATH  — /var/www/mirror-server or /var/www/dina-server
+SERVER_DIST_PATH    — /var/www/mirror-client/dist (frontend only)
 ```
 
 ---
 
 ## 6. Implementation Roadmap
 
-### Phase 1: Foundation (This Session)
-- [ ] Create GitHub Actions workflow files for all 3 services
-- [ ] Create reusable workflow templates
-- [ ] Set up branch protection rules
-- [ ] Create `.env.example` files for documentation
+### Phase 1: Foundation (Complete)
+- [x] Create GitHub Actions workflow files for all 3 services
+- [x] Server setup script (sudoers for PM2, git safe directories)
+- [x] GitHub Secrets configured in all 3 repos
+- [x] SSH deploy keys created and installed
+- [ ] Install workflow files in each repo and push to develop
+- [ ] Set up branch protection rules on GitHub
 
 ### Phase 2: Local Development Setup
 - [ ] VS Code workspace configuration
@@ -522,20 +517,6 @@ VPS_DEPLOY_PATH   — /var/www/mirror-server or /var/www/dina-server
 - **Matrix builds** — test across Node versions simultaneously
 - **Secrets management** — built-in encrypted secrets
 
-### What's a "Reusable Workflow"?
-
-Think of it like a function in code. Instead of copy-pasting the same 20 lines of YAML into 3 pipeline files, you write it once and call it:
-
-```yaml
-# In mirror-server.yml:
-jobs:
-  typecheck:
-    uses: ./.github/workflows/reusable/typescript-check.yml
-    with:
-      node-version: '20'
-      working-directory: '.'
-```
-
 ### Why Not Docker (Yet)?
 
 Docker adds value when you need:
@@ -557,6 +538,6 @@ SSH → vim index.ts → :wq → npm run deploy → check if it works
 VS Code (local) → write code → git commit → git push
 → GitHub runs checks automatically
 → If PR: shows green/red checks, blocks merge if failing
-→ If merge to main: auto-deploys to production
+→ If merge to master: auto-deploys to production
 → You get notified if deploy succeeds or fails
 ```
