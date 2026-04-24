@@ -4,8 +4,8 @@
 # Enterprise-grade pipeline for the Mirror React SPA frontend.
 #
 # TRIGGERS:
-#   - Push to main or develop → full pipeline + deploy
-#   - Pull request to main or develop → quality gates only (no deploy)
+#   - Push to master or develop → full pipeline + deploy
+#   - Pull request to master or develop → quality gates only (no deploy)
 #   - Manual dispatch → full pipeline with optional deploy
 #
 # QUALITY GATES:
@@ -17,23 +17,23 @@
 #   6. Security audit (npm audit)
 #
 # DEPLOYMENT:
-#   - SSH into production server as mirror_app
-#   - Git pull → npm ci → vite build → copy .htaccess
-#   - Smoke test (verify /Mirror/ serves index.html)
+#   - Build dist/ on GitHub Actions (free compute, consistent environment)
+#   - SCP dist/ to production server at /var/www/mirror-client/dist/
 #   - NO PM2 restart needed (static files served by Apache)
+#   - Smoke test (verify /Mirror/ serves 200)
 #
-# NOTE: The frontend source lives at /var/www/mirror-client/ on the server.
-#       Vite builds to /var/www/mirror-client/dist/ which Apache serves
-#       via Alias "/Mirror" "/var/www/mirror-client/dist"
+# NOTE: The GitHub repo has source in client/ subdirectory.
+#       The production server has source at /var/www/mirror-client/ (no client/ wrapper).
+#       We build on GitHub Actions and deploy the compiled dist/ to avoid this mismatch.
 # =============================================================================
 
 name: Mirror Frontend CI/CD
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [master, develop]
   workflow_dispatch:
     inputs:
       deploy:
@@ -58,7 +58,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # The Mirror repo has source in client/ subdirectory
     defaults:
       run:
         working-directory: client
@@ -110,7 +109,6 @@ jobs:
 
       - name: Bundle size check
         run: |
-          # Warn if total bundle exceeds 5MB (Three.js + TensorFlow are large)
           TOTAL_KB=$(du -sk dist/ | cut -f1)
           echo "Bundle size: ${TOTAL_KB}KB"
 
@@ -126,6 +124,14 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
+      - name: Upload build artifact
+        if: github.ref == 'refs/heads/master' || (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-frontend-dist
+          path: client/dist/
+          retention-days: 5
+
   # ===========================================================================
   # JOB 2: DEPLOY TO PRODUCTION
   # ===========================================================================
@@ -135,7 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
 
     environment:
@@ -148,6 +154,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mirror-frontend-dist
+          path: dist/
+
+      - name: Verify artifact
+        run: |
+          if [ ! -f "dist/index.html" ]; then
+            echo "::error::Build artifact missing index.html"
+            exit 1
+          fi
+          echo "Artifact contents:"
+          ls -la dist/
+
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -155,68 +176,56 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Create pre-deploy snapshot
+      - name: Backup current dist on server
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'SNAPSHOT'
-          cd ${{ secrets.SERVER_SOURCE_PATH }}
-          CURRENT_COMMIT=$(git rev-parse HEAD)
-          echo "Pre-deploy commit: $CURRENT_COMMIT"
-          echo "$CURRENT_COMMIT" > /tmp/.mirror-client-rollback-commit
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'BACKUP'
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
 
-          # Backup current dist for instant rollback (no rebuild needed)
-          if [ -d "dist" ]; then
+          if [ -d "$DIST_PATH" ]; then
             rm -rf /tmp/.mirror-client-dist-backup
-            cp -r dist /tmp/.mirror-client-dist-backup
-            echo "Dist backup created at /tmp/.mirror-client-dist-backup"
+            cp -r "$DIST_PATH" /tmp/.mirror-client-dist-backup
+            echo "Backup created at /tmp/.mirror-client-dist-backup"
+            echo "Backup size: $(du -sh /tmp/.mirror-client-dist-backup | cut -f1)"
+          else
+            echo "No existing dist to backup"
           fi
-          SNAPSHOT
+          BACKUP
 
-      - name: Deploy Mirror frontend
+      - name: Deploy dist to server
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'DEPLOY_SCRIPT'
-          set -e
-
           echo "=========================================="
           echo "  MIRROR FRONTEND DEPLOYMENT"
           echo "  $(date '+%Y-%m-%d %H:%M:%S')"
           echo "=========================================="
 
-          cd ${{ secrets.SERVER_SOURCE_PATH }}
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
 
-          # Step 1: Pull latest code
-          echo "[1/4] Pulling latest code..."
-          git fetch origin main
-          git reset --hard origin/main
+          # Step 1: Clear old dist on server
+          echo "[1/3] Clearing old dist..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "rm -rf $DIST_PATH/*"
 
-          # Step 2: Install dependencies
-          echo "[2/4] Installing dependencies..."
-          npm ci
+          # Step 2: Upload new dist via SCP
+          echo "[2/3] Uploading new build..."
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -r \
+            dist/* ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$DIST_PATH/
 
-          # Step 3: Build with Vite
-          echo "[3/4] Building frontend..."
-          npm run build
-
-          # Step 4: Verify build
-          echo "[4/4] Verifying build..."
-          if [ ! -f "dist/index.html" ]; then
-            echo "ERROR: Build failed — dist/index.html missing!"
+          # Step 3: Verify files landed
+          echo "[3/3] Verifying deployment..."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << VERIFY
+          if [ -f "$DIST_PATH/index.html" ] && [ -f "$DIST_PATH/.htaccess" ]; then
+            echo "Deploy verified:"
+            ls -la $DIST_PATH/
+            echo ""
+            echo "Bundle size: \$(du -sh $DIST_PATH/ | cut -f1)"
+          else
+            echo "ERROR: Deploy verification failed!"
             exit 1
           fi
-
-          if [ ! -f "dist/.htaccess" ]; then
-            echo "ERROR: .htaccess missing from dist — SPA routing will break!"
-            exit 1
-          fi
-
-          echo ""
-          echo "Deploy complete."
-          echo "Dist contents:"
-          ls -la dist/
-          echo ""
-          echo "Bundle size: $(du -sh dist/ | cut -f1)"
-          DEPLOY_SCRIPT
+          VERIFY
 
       - name: Smoke test
         id: smoke_test
@@ -256,25 +265,20 @@ jobs:
         run: |
           echo "::error::DEPLOYING ROLLBACK..."
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ROLLBACK_SCRIPT'
-          cd ${{ secrets.SERVER_SOURCE_PATH }}
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'ROLLBACK'
+          DIST_PATH="${{ secrets.SERVER_DIST_PATH }}"
 
-          # Fast rollback: restore dist backup (no rebuild needed)
           if [ -d "/tmp/.mirror-client-dist-backup" ]; then
             echo "Restoring dist from backup..."
-            rm -rf dist
-            cp -r /tmp/.mirror-client-dist-backup dist
-            echo "Fast rollback complete."
+            rm -rf "$DIST_PATH"
+            cp -r /tmp/.mirror-client-dist-backup "$DIST_PATH"
+            echo "Rollback complete."
+            ls -la "$DIST_PATH/"
           else
-            echo "No dist backup found. Rolling back via git..."
-            ROLLBACK_COMMIT=$(cat /tmp/.mirror-client-rollback-commit 2>/dev/null)
-            if [ -n "$ROLLBACK_COMMIT" ]; then
-              git checkout "$ROLLBACK_COMMIT"
-              npm ci
-              npm run build
-            fi
+            echo "ERROR: No backup found! Manual intervention required."
+            exit 1
           fi
-          ROLLBACK_SCRIPT
+          ROLLBACK
 
       - name: Tag release
         if: success()

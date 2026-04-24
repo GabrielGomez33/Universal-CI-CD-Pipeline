@@ -4,8 +4,8 @@
 # Enterprise-grade pipeline for the Mirror backend API + worker processes.
 #
 # TRIGGERS:
-#   - Push to main or develop → full pipeline + deploy
-#   - Pull request to main or develop → quality gates only (no deploy)
+#   - Push to master or develop → full pipeline + deploy
+#   - Pull request to master or develop → quality gates only (no deploy)
 #   - Manual dispatch → full pipeline with optional deploy
 #
 # QUALITY GATES:
@@ -26,9 +26,9 @@ name: Mirror Server CI/CD
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [master, develop]
   workflow_dispatch:
     inputs:
       deploy:
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true')
 
     environment:
@@ -159,8 +159,8 @@ jobs:
 
           # Step 1: Pull latest code
           echo "[1/5] Pulling latest code..."
-          git fetch origin main
-          git reset --hard origin/main
+          git fetch origin master
+          git reset --hard origin/master
 
           # Step 2: Install production dependencies
           echo "[2/5] Installing dependencies..."
