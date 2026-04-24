@@ -1,5 +1,8 @@
 # Universal CI/CD Pipeline - Ecosystem Analysis & Architecture Plan
 
+> **Status**: Analysis complete. Pipeline workflows written and ready for installation.
+> See [INSTALL.md](./INSTALL.md) for step-by-step installation instructions.
+
 ## Table of Contents
 1. [Ecosystem Overview](#ecosystem-overview)
 2. [Repository Deep Dive](#repository-deep-dive)
