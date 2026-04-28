@@ -84,6 +84,10 @@ jobs:
         run: npx tsc -b --noEmit
 
       - name: Vite production build
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_PAYPAL_CLIENT_ID: ${{ secrets.VITE_PAYPAL_CLIENT_ID }}
+          VITE_PAYPAL_PLAN_ID: ${{ secrets.VITE_PAYPAL_PLAN_ID }}
         run: npm run build
 
       - name: Verify build output
