@@ -11,9 +11,10 @@
 # QUALITY GATES:
 #   1. Dependency install (deterministic via npm ci)
 #   2. TypeScript strict type-check (tsc --noEmit)
-#   3. Full production build (tsc → dist/)
-#   4. Security audit (npm audit)
-#   5. Secret scanning (prevent accidental credential commits)
+#   3. Unit + integration tests (Jest)
+#   4. Full production build (tsc → dist/)
+#   5. Security audit (npm audit)
+#   6. Secret scanning (prevent accidental credential commits)
 #
 # DEPLOYMENT:
 #   - SSH into production server as mirror_app
@@ -69,6 +70,9 @@ jobs:
 
       - name: TypeScript type-check (strict)
         run: npx tsc --noEmit
+
+      - name: Run unit and integration tests
+        run: npx jest --ci --passWithNoTests --forceExit
 
       - name: Build production artifacts
         run: npm run build
